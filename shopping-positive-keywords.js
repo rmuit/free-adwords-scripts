@@ -29,7 +29,8 @@ var processCampaignTypes = ["Shopping", "Text"];
 // created for each ad group.
 // If this constant is true, only one row of keywords (row B) is checked in the
 // sheet; no ad group is used / needs to be defined in the sheet; and the
-// negative keywords are created for the campaign as a whole.
+// negative keywords are created for the campaign as a whole. (Any negative
+// keywords tht may exist for specific ad groups already are disregarded.)
 var CAMPAIGN_LEVEL_KEYWORDS = false;
 
 // Threshold for logs. Only messages with this level and higher will be logged.
@@ -172,6 +173,61 @@ function main() {
         log("Query: " + query, LOGLEVEL_TRACE);
         report = AdWordsApp.report(query);
 
+        // Get the existing negative keywords for this campaign / ad group, to
+        // check whether keywords from the report are already added. (Note
+        // keywords targeted to an ad group are a supergroup of queries
+        // targeted to its campaign - or they are a separate group in the API;
+        // I'm not sure yet. In the Web UI, they are displayed like a supergroup.
+        // This unlike the above report for queries; queries in an ad group are
+        // a subgroup of queries for its campaign.)
+        //
+        // *NOTE* - THIS DOES NOT WORK YET, UNLESS SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"] IS TRUE,
+        // because it doesn't work for Shopping: we can't get to existing negative keywords for ad groups.
+        // I don't know why exactly, but
+        // - Methods ShoppingAdGroup.negativeKeywords() / negativeKeywordLists() don't exist
+        //   (and they do for AdGroup, Campaign and ShoppingCampaign)
+        // - I don't know the fieldname to use for ShoppingCampaign.negativeKeywords().withCondition() to select
+        //   on AdGroup. (It's not 'AdGroup' or 'AdGroupName'.)
+        // - But ShoppingAdGroup.createNegativeKeyword _does_ exist, so
+        //   "negative keywords for a Shopping ad group" is clearly a thing. As
+        //   olso proven by this script which didn't even have
+        //   "CAMPAIGN_LEVEL_KEYWORDS" previously.
+        // Until this mystery is solved and/or we want to start testing this for
+        // 'non-Shopping' ad groups, Let's if() it. This will just mean that
+        // the previous behavior of trying again and again to add the same
+        // negative keyword, still exists. (If someone wants to test this for
+        // 'non-Shopping' ad groups, go ahead and change the if().)
+        var checkExistingNegKeywords = SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"];
+        var negKeywords = {};
+        if (checkExistingNegKeywords) {
+          log("Getting existing negative keywords...", LOGLEVEL_DEBUG);
+          var negKeywordCount = 0;
+          var negativeKeyword;
+          iterator = adGroupOrCampaign.negativeKeywords().get();
+          while (iterator.hasNext()) {
+            negativeKeyword = iterator.next();
+            negKeywords[negativeKeyword.getText()] = 1;
+            negKeywordCount++;
+          }
+          var negKeywordNonListCount = negKeywordCount;
+          // Also get keywords from any lists. (This might mean we're re-reading
+          // the same list if it has been used in another campaign we previously
+          // processed; there's no caching for this.)
+          iterator = adGroupOrCampaign.negativeKeywordLists().get();
+          // var negKeywordListCount = iterator.totalNumEntities;
+          while (iterator.hasNext()) {
+            var list = iterator.next();
+            var iterator2 = list.negativeKeywords().get();
+            while (iterator2.hasNext()) {
+              negativeKeyword = iterator2.next();
+              negKeywords[negativeKeyword.getText()] = 1;
+              negKeywordCount++;
+            }
+          }
+          log("Got " + negKeywordCount + " existing negative keywords (" + (negKeywordCount - negKeywordNonListCount) + " of which are from keyword lists).", LOGLEVEL_DEBUG);
+          log(JSON.stringify(negKeywords), LOGLEVEL_TRACE);
+        }
+
         var rows = report.rows();
         var negs = [];
         // Loop through this campaign's queries; add anything which doesn't
@@ -181,15 +237,21 @@ function main() {
         while (rows.hasNext()) {
           var nxt = rows.next();
           var queryString = nxt.Query;
-          var matches = 0;
+          var queryWithMatchType = addMatchType(queryString, SETTINGS);
+
+          if (matchingNegativeKeyword(queryWithMatchType, negKeywords)) {
+            // Log 'trace' so that if we select DEBUG as threshold, we only
+            // get a list of 'to be added' keywords.
+            log("Query '" + queryString + "' exists as negative keyword; skipping.", LOGLEVEL_TRACE);
+            continue;
+          }
 
           // Loop through the positive keywords (from the sheet); if we find
           // enough matches then stop processing.
+          var matches = 0;
           for (var k in keywords) {
             if (containsKeyword(queryString, keywords[k])) {
               matches++;
-              // Log 'trace' so that if we select DEBUG as threshold, we only
-              // get a list of 'to be added' keywords.
               if (matches >= minKeywordMatches) {
                 log("Query '" + queryString + "' contains positive keyword '" + keywords[k] + "'; skipping.", LOGLEVEL_TRACE);
                 break;
@@ -200,10 +262,11 @@ function main() {
 
           // Add as a negative keyword if we did not find enough matches.
           if (matches < minKeywordMatches) {
-            // Use 'debug' level because every script will try to re-add the
-            // same keywords, so it's not extremely useful.
-            log("Query '" + queryString + "' will be added as negative keyword.", LOGLEVEL_DEBUG);
-            negs.push(queryString);
+            negs.push(queryWithMatchType);
+            // If we're not checking against existing negative keywords, the
+            // script will try to re-add the same keywords every time, so this
+            // log is not extremely useful.
+            log("Query '" + queryString + "' will be added as negative keyword.", checkExistingNegKeywords ? LOGLEVEL_INFO : LOGLEVEL_DEBUG);
           }
         }
 
@@ -211,8 +274,7 @@ function main() {
         if (negs.length) {
           log("Adding a total of " + negs.length + " negative keywords...");
           for (var neg in negs) {
-            neg = addMatchType(negs[neg], SETTINGS);
-            adGroupOrCampaign.createNegativeKeyword(neg);
+            adGroupOrCampaign.createNegativeKeyword(negs[neg]);
           }
         } else {
           log("Found no new negative keywords to add.");
@@ -261,6 +323,17 @@ function containsKeyword(string, keyword) {
     }
   }
   return match;
+}
+
+/**
+ * Returns True if a query string (already modified with match type) is found
+ * in a map of keywords.
+ */
+function matchingNegativeKeyword(keywordWithMatchType, keywordMap) {
+  // We could extend this logic, e.g. if queryWithMatchType == '[word]' and
+  // 'word' or '+word' was already defined as a negative keyword, we could
+  // regard that as a match. But let's keep it simple for now.
+  return keywordMap[keywordWithMatchType] !== undefined;
 }
 
 function addMatchType(word, SETTINGS) {
