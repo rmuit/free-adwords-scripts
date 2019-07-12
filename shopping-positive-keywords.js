@@ -65,6 +65,7 @@ function main() {
     var sheetName = sheetNamesByTime[timesBySheet[iSheet]];
     log("Checking sheet: " + sheetName);
     sheet = SS.getSheetByName(sheetName);
+    var lastRow = sheet.getLastRow();
 
     var SETTINGS = {};
     SETTINGS["CAMPAIGN_NAME"] = sheet.getRange("A2").getValue();
@@ -117,9 +118,10 @@ function main() {
         // group. NOTE: if the row contains duplicate keywords, these will
         // count as two matches, which is important if minKeywordMatches > 1!
         var keywords = [];
-        var row = firstAdGroupRow;
-        while (sheet.getRange(row, currentAdgroupCol).getValue()) {
-          keywords.push(sheet.getRange(row, currentAdgroupCol).getValue());
+        var values = sheet.getRange(firstAdGroupRow, currentAdgroupCol, lastRow).getValues();
+        var row = 0;
+        while (values[row][0]) {
+          keywords.push(values[row][0]);
           row++;
         }
         log("Got " + keywords.length + " 'positive keywords' from sheet: " + keywords, LOGLEVEL_DEBUG);
