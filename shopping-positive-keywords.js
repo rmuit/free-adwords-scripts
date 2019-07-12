@@ -20,6 +20,18 @@ var SS = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
 // a difference between "Shopping" and any other type.
 var processCampaignTypes = ["Shopping", "Text"];
 
+// This affects script behavior IF "Campaign Level Queries" in the sheet is
+// "Yes". (If "No", this constant is not used.)
+// "Campaign Level Queries" means the user queries are read from all ad groups
+// in the campaign.
+// If this constant is false, all those queries are still checked against a
+// list of keywords in the sheet, for each ad group - and negative keywords are
+// created for each ad group.
+// If this constant is true, only one row of keywords (row B) is checked in the
+// sheet; no ad group is used / needs to be defined in the sheet; and the
+// negative keywords are created for the campaign as a whole.
+var CAMPAIGN_LEVEL_KEYWORDS = false;
+
 // Threshold for logs. Only messages with this level and higher will be logged.
 var LOG_THRESHOLD = 2;
 
@@ -74,6 +86,8 @@ function main() {
     SETTINGS["DATE_RANGE"] = sheet.getRange("D2").getValue();
     SETTINGS["NEGATIVE_MATCH_TYPE"] = sheet.getRange("E2").getValue();
     SETTINGS["CAMPAIGN_LEVEL_QUERIES"] = sheet.getRange("F2").getValue() === "Yes";
+    // CAMPAIGN_LEVEL_KEYWORDS constant should not be used further; only setting.
+    SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"] = SETTINGS["CAMPAIGN_LEVEL_QUERIES"] && CAMPAIGN_LEVEL_KEYWORDS;
     log("Settings: " + JSON.stringify(SETTINGS), LOGLEVEL_DEBUG);
 
     var numMatchesRow = 4;
@@ -85,34 +99,45 @@ function main() {
     var currentAdgroupCol = 2;
     while (sheet.getRange(numMatchesRow, currentAdgroupCol).getValue()) {
       var minKeywordMatches = sheet.getRange(numMatchesRow, currentAdgroupCol).getValue();
-      var adGroupName = sheet.getRange(adGroupNameRow, currentAdgroupCol).getValue();
-      log("Checking campaign: " + SETTINGS["CAMPAIGN_NAME"] +"; ad group: " + adGroupName);
+      var adGroupName;
+      if (!SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"]) {
+        adGroupName = sheet.getRange(adGroupNameRow, currentAdgroupCol).getValue();
+      }
 
       // Iterate through types of campaigns. (We assume that a campaign with a
       // certain name can only be one of those types, so all except one will
       // immediately warn and continue before doing any real processing.)
       for (var t in processCampaignTypes) {
         var campaignType = processCampaignTypes[t];
+        var selector;
+        var iterator;
 
-        // Get AdGroup object; check if this campaign / ad group exists. NOTE:
-        // even when we get queries by campaign level, negative keywords are
-        // still added for each specified ad group (not for a campaign). So we
-        // still iterate through all ad groups and check their names.
+        // Get AdGroup or Campaign object, to add negative keywords to. This
+        // also checks for existence of this campaign / ad group.
         if (campaignType === "Shopping") {
-          var adGroupIterator = AdWordsApp.shoppingAdGroups()
+          selector = SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"] ? AdWordsApp.shoppingCampaigns() : AdWordsApp.shoppingAdGroups();
         } else {
-          var adGroupIterator = AdWordsApp.adGroups()
+          selector = SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"] ? AdWordsApp.campaigns() : AdWordsApp.adGroups();
         }
-        adGroupIterator = adGroupIterator
-          .withCondition("Name = '" + adGroupName + "'")
-          .withCondition("CampaignName = '" + SETTINGS["CAMPAIGN_NAME"] + "'")
-          .get();
+        selector = selector.withCondition("CampaignName = '" + SETTINGS["CAMPAIGN_NAME"] + "'");
+        if (!SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"]) {
+          selector = selector.withCondition("Name = '" + adGroupName + "'");
 
-        if (!adGroupIterator.hasNext()) {
-          log("Ad group '" + adGroupName + "' in campaign '" + SETTINGS["CAMPAIGN_NAME"] + "' (campaign type " + campaignType + ") not found in the account. Check if the ad group / campaign name is correct in the sheet.", LOGLEVEL_WARN);
-          continue;
+          iterator = selector.get();
+          if (!iterator.hasNext()) {
+            log("Ad group '" + adGroupName + "' in campaign '" + SETTINGS["CAMPAIGN_NAME"] + "' (campaign type " + campaignType + ") not found in the account. Check if the ad group / campaign name is correct in the sheet.", LOGLEVEL_WARN);
+            continue;
+          }
+          log("Checking campaign: " + SETTINGS["CAMPAIGN_NAME"] +"; ad group: " + adGroupName);
+        } else {
+          iterator = selector.get();
+          if (!iterator.hasNext()) {
+            log("Campaign '" + SETTINGS["CAMPAIGN_NAME"] + "' (campaign type " + campaignType + ") not found in the account. Check if the campaign name is correct in the sheet.", LOGLEVEL_WARN);
+            continue;
+          }
+          log("Checking campaign: " + SETTINGS["CAMPAIGN_NAME"]);
         }
-        var adGroup = adGroupIterator.next();
+        var adGroupOrCampaign = iterator.next();
 
         // Get the 'positive' keywords from the sheet for this campaign / ad
         // group. NOTE: if the row contains duplicate keywords, these will
@@ -182,18 +207,24 @@ function main() {
           }
         }
 
-        // Now add the new negative keywords to the ad group.
+        // Now add the new negative keywords to the ad group / campaign.
         if (negs.length) {
           log("Adding a total of " + negs.length + " negative keywords...");
           for (var neg in negs) {
             neg = addMatchType(negs[neg], SETTINGS);
-            adGroup.createNegativeKeyword(neg);
+            adGroupOrCampaign.createNegativeKeyword(neg);
           }
         } else {
           log("Found no new negative keywords to add.");
         }
       }//end ad types loop
 
+      // For campaign level queries, check only column B; we don't want to redo
+      // the exact same query report (even with e.g. different nr of matches).
+      if (SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"]) {
+        log("Not checking further rows in this sheet, since we added negative keywords at the campaign level.", LOGLEVEL_DEBUG);
+        break;
+      }
       currentAdgroupCol++;
     }
 
