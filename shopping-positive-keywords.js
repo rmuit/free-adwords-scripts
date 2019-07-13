@@ -42,6 +42,10 @@ var LOGLEVEL_INFO = 2;
 var LOGLEVEL_WARN = 3;
 var LOGLEVEL_ERROR = 4;
 
+// Variable containing positive keywords. Defined outside of main() so we don't
+// need to pass it (by value) into functions.
+var positiveKeywords = [];
+
 function main() {
   var timeStampCol = 7;
   var sheets = SS.getSheets();
@@ -143,14 +147,14 @@ function main() {
         // Get the 'positive' keywords from the sheet for this campaign / ad
         // group. NOTE: if the row contains duplicate keywords, these will
         // count as two matches, which is important if minKeywordMatches > 1!
-        var keywords = [];
+        positiveKeywords = [];
         var values = sheet.getRange(firstAdGroupRow, currentAdgroupCol, lastRow).getValues();
         var row = 0;
         while (values[row][0]) {
-          keywords.push(values[row][0]);
+          positiveKeywords.push(values[row][0]);
           row++;
         }
-        log("Got " + keywords.length + " 'positive keywords' from sheet: " + keywords, LOGLEVEL_DEBUG);
+        log("Got " + positiveKeywords.length + " 'positive keywords' from sheet: " + positiveKeywords, LOGLEVEL_DEBUG);
 
         // Get the search queries from the campaign
         var report = null;
@@ -200,16 +204,29 @@ function main() {
         var checkExistingNegKeywords = SETTINGS["CAMPAIGN_LEVEL_KEYWORDS"];
         var negKeywords = {};
         if (checkExistingNegKeywords) {
+          // If the 'match type' of a negative keyword that we find in the
+          // map is the same as our setting, we assume we can safely remove it.
+          // (This is so that we can remove negative keywords automatically,
+          // which were added by an earlier run of this script, after which the
+          // keyword was added as a positive one in the sheet to correct the
+          // situation. Also negative keywords that consist of multiple words
+          // and contain the positive keyword, will be removed automatically.)
+          // Otherwise we only warn and leave it to the user to deal with.
+          var removeMatchType = SETTINGS["NEGATIVE_MATCH_TYPE"].toUpperCase();
+
           log("Getting existing negative keywords...", LOGLEVEL_DEBUG);
           var negKeywordCount = 0;
           var negativeKeyword;
           iterator = adGroupOrCampaign.negativeKeywords().get();
           while (iterator.hasNext()) {
             negativeKeyword = iterator.next();
-            negKeywords[negativeKeyword.getText()] = 1;
-            negKeywordCount++;
+            if (checkNegKeywordAgainstPos(negativeKeyword, removeMatchType)) {
+              negKeywords[negativeKeyword.getText()] = 1;
+              negKeywordCount++;
+            }
           }
           var negKeywordNonListCount = negKeywordCount;
+
           // Also get keywords from any lists. (This might mean we're re-reading
           // the same list if it has been used in another campaign we previously
           // processed; there's no caching for this.)
@@ -217,11 +234,17 @@ function main() {
           // var negKeywordListCount = iterator.totalNumEntities;
           while (iterator.hasNext()) {
             var list = iterator.next();
+            // If we find a keyword from this list in the map, don't
+            // automatically remove it; just warn.
+            removeMatchType = "*" + list.getName();
+
             var iterator2 = list.negativeKeywords().get();
             while (iterator2.hasNext()) {
               negativeKeyword = iterator2.next();
-              negKeywords[negativeKeyword.getText()] = 1;
-              negKeywordCount++;
+              if (checkNegKeywordAgainstPos(negativeKeyword, removeMatchType)) {
+                negKeywords[negativeKeyword.getText()] = 1;
+                negKeywordCount++;
+              }
             }
           }
           log("Got " + negKeywordCount + " existing negative keywords (" + (negKeywordCount - negKeywordNonListCount) + " of which are from keyword lists).", LOGLEVEL_DEBUG);
@@ -249,14 +272,14 @@ function main() {
           // Loop through the positive keywords (from the sheet); if we find
           // enough matches then stop processing.
           var matches = 0;
-          for (var k in keywords) {
-            if (containsKeyword(queryString, keywords[k])) {
+          for (var k in positiveKeywords) {
+            if (containsKeyword(queryString, positiveKeywords[k])) {
               matches++;
               if (matches >= minKeywordMatches) {
-                log("Query '" + queryString + "' contains positive keyword '" + keywords[k] + "'; skipping.", LOGLEVEL_TRACE);
+                log("Query '" + queryString + "' contains positive keyword '" + positiveKeywords[k] + "'; skipping.", LOGLEVEL_TRACE);
                 break;
               }
-              log("Query '" + queryString + "' contains positive keyword '" + keywords[k] + "', but continuing (" + matches + " < " + minKeywordMatches + " matches).", LOGLEVEL_TRACE);
+              log("Query '" + queryString + "' contains positive keyword '" + positiveKeywords[k] + "', but continuing (" + matches + " < " + minKeywordMatches + " matches).", LOGLEVEL_TRACE);
             }
           }
 
@@ -326,6 +349,49 @@ function containsKeyword(string, keyword) {
 }
 
 /**
+ * Checks a negative keyword against the map of positive keywords; if it is
+ * found (meaning that the negative keyword contains any positive keyword), we
+ * remove it or log a warning.
+ *
+ * (So if a positive keyword is multiple words and contains the negative keyword
+ * which is 'smaller', then the negative keyword isn't removed.)
+ *
+ * @param negativeKeyword
+ *   AdsApp.​NegativeKeyword object
+ * @param removeMatchType
+ *   Remove the keyword if it's equal to this match type; otherwise warn. Must
+ *   be uppercase. Pass "*<LISTNAME>" to indicate that it should never be
+ *   removed because it's part of a negative keyword list; the list name will
+ *   be used in the warning message.
+ *
+ * @return
+ *   True if the negative keyword still exists, False if it was removed.
+ */
+function checkNegKeywordAgainstPos(negativeKeyword, removeMatchType) {
+  var exists = true;
+  var string = stripKeywordModifiers(negativeKeyword.getText());
+  // We're using the file-scoped positiveKeywords variable.
+  for (var k in positiveKeywords) {
+    if (containsKeyword(string, positiveKeywords[k])) {
+      // Negative keyword is equal to / contains a positive keyword in the sheet.
+      // Check if we should remove it or just warn.
+      if (removeMatchType[0] === '*') {
+        log("Keyword '" + positiveKeywords[k] + "' found in sheet has a related negative keyword '" + negativeKeyword.getText() + "', which should likely be removed! The negative keyword is part of a list named '" + removeMatchType.substr(1) + "'.", LOGLEVEL_WARN);
+      } else if (removeMatchType !== negativeKeyword.getMatchType()) {
+        log("Keyword '" + positiveKeywords[k] + "' found in sheet has a related negative keyword '" + negativeKeyword.getText() + "', which should likely be removed!", LOGLEVEL_WARN);
+      } else {
+        log("Keyword '" + positiveKeywords[k] + "' found in sheet has a related negative keyword '" + negativeKeyword.getText() + "'. Removing the negative keyword.", LOGLEVEL_WARN);
+        negativeKeyword.remove();
+        exists = false;
+      }
+      break;
+    }
+  }
+
+  return exists;
+}
+
+/**
  * Returns True if a query string (already modified with match type) is found
  * in a map of keywords.
  */
@@ -351,6 +417,36 @@ function addMatchType(word, SETTINGS) {
     throw("Error: Match type not recognised. Please provide one of Broad, BMM, Exact or Phrase")
   }
   return word;
+}
+
+/**
+ * Strips keyword modifiers from a keyword, with the intention of
+ * having a canonical keyword that we can search for individual words.
+ */
+function stripKeywordModifiers(keyword) {
+  if ((keyword[0] === '[' && keyword[keyword.length - 1] === ']') ||
+    (keyword[0] === '"' && keyword[keyword.length - 1] === '"')) {
+    // Exact keywords or phrase. Modify nothing else.
+    keyword = keyword.substring(1, keyword.length - 1);
+  } else {
+    // Double quotes and plus signs can both be used inside a search term;
+    // they're just word modifiers. Since our caller is interested in just
+    // the search words, we just remove them, as follows:
+    // - Assume '+' is only used at the beginning of a word or is preceded by
+    //   a space.
+    // - Assume '"' is only used at the beginning/end of the full string or has
+    //   a space before or after it, and there are always pairs in the string.
+    // This means we can just remove all of them because they are never literal
+    // parts of a keyword. If this is not the case... this code needs adjusting.
+    if (keyword.indexOf('"') >= 0) {
+      keyword = keyword.split('"').join(' ');
+    }
+    if (keyword.indexOf('+') >= 0) {
+      keyword = keyword.split('+').join(' ');
+    }
+  }
+
+  return keyword;
 }
 
 function log(message, level) {
