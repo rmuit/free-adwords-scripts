@@ -33,6 +33,15 @@ var processCampaignTypes = ["Shopping", "Text"];
 // keywords tht may exist for specific ad groups already are disregarded.)
 var CAMPAIGN_LEVEL_KEYWORDS = false;
 
+// If True, remove any negative keywords from Google Ads which are found in the
+// sheet and which have the same 'match type' (and are standalone, not part of
+// a list of negative keywords). If False, only warn about them.
+// (This has effect only if CAMPAIGN_LEVEL_KEYWORDS is True, since this script
+// is currently unable to access existing negative keywords on the ad group
+// level. Its behavior might be extended in the future, by recognizing other
+// values to remove more types of negative keywords.)
+var REMOVE_MATCHING_NEGATIVES = false;
+
 // Threshold for logs. Only messages with this level and higher will be logged.
 var LOG_THRESHOLD = 2;
 
@@ -377,7 +386,7 @@ function checkNegKeywordAgainstPos(negativeKeyword, removeMatchType) {
       // Check if we should remove it or just warn.
       if (removeMatchType[0] === '*') {
         log("Keyword '" + positiveKeywords[k] + "' found in sheet has a related negative keyword '" + negativeKeyword.getText() + "', which should likely be removed! The negative keyword is part of a list named '" + removeMatchType.substr(1) + "'.", LOGLEVEL_WARN);
-      } else if (removeMatchType !== negativeKeyword.getMatchType()) {
+      } else if (!REMOVE_MATCHING_NEGATIVES || removeMatchType !== negativeKeyword.getMatchType()) {
         log("Keyword '" + positiveKeywords[k] + "' found in sheet has a related negative keyword '" + negativeKeyword.getText() + "', which should likely be removed!", LOGLEVEL_WARN);
       } else {
         log("Keyword '" + positiveKeywords[k] + "' found in sheet has a related negative keyword '" + negativeKeyword.getText() + "'. Removing the negative keyword.", LOGLEVEL_WARN);
